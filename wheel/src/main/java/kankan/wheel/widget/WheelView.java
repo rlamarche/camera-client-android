@@ -881,4 +881,8 @@ public class WheelView extends View {
 	public void stopScrolling() {
 	    scroller.stopScrolling();
 	}
+
+	public boolean isScrolling() {
+		return isScrollingPerformed;
+	}
 }

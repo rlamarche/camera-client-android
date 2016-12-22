@@ -16,15 +16,26 @@ import com.github.niqdev.mjpeg.DisplayMode;
 import com.github.niqdev.mjpeg.Mjpeg;
 import com.github.niqdev.mjpeg.MjpegInputStream;
 import com.github.niqdev.mjpeg.MjpegSurfaceView;
+import com.koushikdutta.async.future.Future;
+import com.koushikdutta.async.http.AsyncHttpClient;
+import com.koushikdutta.async.http.WebSocket;
 import com.rlamarche.cameraclient.async.CapturePhotoAsyncTask;
 import com.rlamarche.cameraclient.async.CaptureStartAsyncTask;
 import com.rlamarche.cameraclient.async.CaptureStopAsyncTask;
 import com.rlamarche.cameraclient.async.GetCameraInfoAsyncTask;
 import com.rlamarche.cameraclient.async.GetCameraStatusAsyncTask;
+import com.rlamarche.cameraclient.async.LiveviewStartAsyncTask;
+import com.rlamarche.cameraclient.async.LiveviewStopAsyncTask;
 import com.rlamarche.cameraclient.async.PostAutofocusAsyncTask;
 import com.rlamarche.cameraclient.async.PostSettingsAsyncTask;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import io.swagger.client.ApiException;
+import io.swagger.client.ApiInvoker;
 import io.swagger.client.model.CameraSettings;
+import io.swagger.client.model.CameraStatus;
 import kankan.wheel.widget.OnWheelChangedListener;
 import kankan.wheel.widget.WheelView;
 import kankan.wheel.widget.adapters.ArrayWheelAdapter;
@@ -55,6 +66,10 @@ public class FullscreenActivity extends AppCompatActivity {
      * and a change of the status and navigation bar.
      */
     private static final int UI_ANIMATION_DELAY = 300;
+    public static final String ISO_AUTO = "AUTO";
+    public static final String EXPOSURE_MODE_M = "M";
+    public static final String EXPOSURE_MODE_A = "A";
+    public static final String EXPOSURE_MODE_SHUTTER_SPEED = "S";
     private final Handler mHideHandler = new Handler();
     private MjpegSurfaceView mContentView;
     private View mControlsView;
@@ -75,6 +90,14 @@ public class FullscreenActivity extends AppCompatActivity {
     private boolean mVisible;
     private CaptureMode mCaptureMode;
     private boolean mIsRecording;
+    private boolean mIsInLiveview;
+
+    private Future<WebSocket> webSocketFuture;
+
+    private String mAperture;
+    private String mShutterSpeed;
+    private String mExposureMode;
+    private String mIso;
 
 
     private final Runnable mHideRunnable = new Runnable() {
@@ -120,27 +143,33 @@ public class FullscreenActivity extends AppCompatActivity {
         mRefreshButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                loadLiveview();
                 readCameraInfo();
                 refreshCameraStatus();
+                if (mIsInLiveview) {
+                    loadLiveview();
+                }
             }
         });
 
         mCaptureButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                switch (mCaptureMode) {
-                    case PHOTO:
-                        new CapturePhotoAsyncTask(FullscreenActivity.this).executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
-                        break;
-                    case VIDEO:
-                        if (mIsRecording) {
-                            new CaptureStopAsyncTask(FullscreenActivity.this).executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
-                        } else {
-                            new CaptureStartAsyncTask(FullscreenActivity.this).executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
-                        }
+                if (mIsInLiveview) {
+                    switch (mCaptureMode) {
+                        case PHOTO:
+                            new CapturePhotoAsyncTask(FullscreenActivity.this).executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
+                            break;
+                        case VIDEO:
+                            if (mIsRecording) {
+                                new CaptureStopAsyncTask(FullscreenActivity.this).executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
+                            } else {
+                                new CaptureStartAsyncTask(FullscreenActivity.this).executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
+                            }
 
-                        break;
+                            break;
+                    }
+                } else {
+                    new CapturePhotoAsyncTask(FullscreenActivity.this).executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
                 }
             }
         });
@@ -155,7 +184,7 @@ public class FullscreenActivity extends AppCompatActivity {
                 if (motionEvent.getAction() == MotionEvent.ACTION_UP) {
                     Log.i(TAG, "DOWNTIME = " + (motionEvent.getEventTime() - motionEvent.getDownTime()));
 
-                    if (motionEvent.getEventTime() - motionEvent.getDownTime() > 200) {
+                    if (motionEvent.getEventTime() - motionEvent.getDownTime() < 200) {
                         toggle();
                     } else {
 
@@ -198,6 +227,11 @@ public class FullscreenActivity extends AppCompatActivity {
             @Override
             public void onClick(View view) {
                 CameraSettings cameraSettings = new CameraSettings();
+                if (mIsInLiveview && CaptureMode.PHOTO.equals(mCaptureMode)) {
+                    new LiveviewStopAsyncTask(FullscreenActivity.this).executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
+                } else if (!mIsInLiveview) {
+                    new LiveviewStartAsyncTask(FullscreenActivity.this).executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
+                }
                 cameraSettings.setCaptureMode(0);
                 applyCameraSettings(cameraSettings);
             }
@@ -207,6 +241,7 @@ public class FullscreenActivity extends AppCompatActivity {
             @Override
             public void onClick(View view) {
                 CameraSettings cameraSettings = new CameraSettings();
+                new LiveviewStartAsyncTask(FullscreenActivity.this).executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
                 cameraSettings.setCaptureMode(1);
                 applyCameraSettings(cameraSettings);
             }
@@ -219,7 +254,7 @@ public class FullscreenActivity extends AppCompatActivity {
                 ArrayWheelAdapter adapter = (ArrayWheelAdapter) wheel.getViewAdapter();
                 String newAperture = String.valueOf(adapter.getItemText(newValue));
 
-                if (newAperture != null) {
+                if (newAperture != null && !newAperture.equals(mAperture)) {
                     CameraSettings cameraSettings = new CameraSettings();
                     cameraSettings.setAperture(newAperture);
                     applyCameraSettings(cameraSettings);
@@ -234,7 +269,7 @@ public class FullscreenActivity extends AppCompatActivity {
                 ArrayWheelAdapter adapter = (ArrayWheelAdapter) wheel.getViewAdapter();
                 String newShutterSpeed = String.valueOf(adapter.getItemText(newValue));
 
-                if (newShutterSpeed != null) {
+                if (newShutterSpeed != null && !newShutterSpeed.equals(mShutterSpeed)) {
                     CameraSettings cameraSettings = new CameraSettings();
                     cameraSettings.setShutterSpeed(newShutterSpeed);
                     applyCameraSettings(cameraSettings);
@@ -249,7 +284,7 @@ public class FullscreenActivity extends AppCompatActivity {
                 ArrayWheelAdapter adapter = (ArrayWheelAdapter) wheel.getViewAdapter();
                 String newExposureMode = String.valueOf(adapter.getItemText(newValue));
 
-                if (newExposureMode != null) {
+                if (newExposureMode != null && !newExposureMode.equals(mExposureMode)) {
                     CameraSettings cameraSettings = new CameraSettings();
                     cameraSettings.setExposureMode(newExposureMode);
                     applyCameraSettings(cameraSettings);
@@ -264,7 +299,7 @@ public class FullscreenActivity extends AppCompatActivity {
                 ArrayWheelAdapter adapter = (ArrayWheelAdapter) wheel.getViewAdapter();
                 String newIso = String.valueOf(adapter.getItemText(newValue));
 
-                if (newIso != null) {
+                if (newIso != null && !newIso.equals(mIso)) {
                     CameraSettings cameraSettings = new CameraSettings();
                     if ("AUTO".equals(newIso)) {
                         cameraSettings.setIsoAuto(true);
@@ -311,9 +346,38 @@ public class FullscreenActivity extends AppCompatActivity {
                 | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
 
-        loadLiveview();
         readCameraInfo();
         refreshCameraStatus();
+        if (mIsInLiveview) {
+            loadLiveview();
+        }
+        openWebsocket();
+    }
+
+    private void openWebsocket() {
+        webSocketFuture = AsyncHttpClient.getDefaultInstance().websocket("ws://172.24.1.1:8081/api/v1/status", "camera", new AsyncHttpClient.WebSocketConnectCallback() {
+            @Override
+            public void onCompleted(Exception ex, WebSocket webSocket) {
+                webSocket.setStringCallback(new WebSocket.StringCallback() {
+                    @Override
+                    public void onStringAvailable(String s) {
+                        try {
+                            final CameraStatus cameraStatus = (CameraStatus) ApiInvoker.deserialize(s, "", CameraStatus.class);
+
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    updateStatus(cameraStatus);
+                                }
+                            });
+
+                        } catch (ApiException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                });
+            }
+        });
     }
 
 
@@ -366,7 +430,6 @@ public class FullscreenActivity extends AppCompatActivity {
                     @Override
                     public void onError(Throwable e) {
                         Log.e(getClass().getSimpleName(), "mjpeg error", e);
-                        Toast.makeText(getApplicationContext(), "Error: " + e.getMessage(), Toast.LENGTH_LONG).show();
                     }
 
                     @Override
@@ -376,6 +439,10 @@ public class FullscreenActivity extends AppCompatActivity {
                         mContentView.showFps(true);
                     }
                 });
+    }
+
+    private void stopLiveview() {
+        mContentView.stopPlayback();
     }
 
     private void readCameraInfo() {
@@ -419,4 +486,101 @@ public class FullscreenActivity extends AppCompatActivity {
 
         // TODO show/hide recording marker + timer
     }
+
+    public void setIsInLiveview(boolean isInLiveview) {
+        mIsInLiveview = isInLiveview;
+    }
+
+    public void enableLiveview() {
+        loadLiveview();
+        refreshCameraStatus();
+    }
+
+    public void disableLiveview() {
+        stopLiveview();
+        refreshCameraStatus();
+    }
+
+    public void updateStatus(CameraStatus cameraStatus) {
+        mAperture = cameraStatus.getAperture();
+        mShutterSpeed = cameraStatus.getShutterSpeed();
+        mExposureMode = cameraStatus.getExposureMode();
+        mIso = cameraStatus.getIso();
+        if (cameraStatus.getIsoAuto()) {
+            mIso = ISO_AUTO;
+        }
+
+        loadApertures(cameraStatus);
+        loadShutterSpeeds(cameraStatus);
+        loadExposureModes(cameraStatus);
+        loadIsos(cameraStatus);
+
+        setCaptureMode(CaptureMode.fromValue(cameraStatus.getCaptureMode()));
+        setIsInLiveview(cameraStatus.getIsInLiveView());;
+    }
+
+
+    private void loadShutterSpeeds(CameraStatus cameraStatus) {
+        List<String> shutterSpeeds = cameraStatus.getShutterSpeeds();
+        ArrayWheelAdapter<String> shutterSpeedsAdapter =
+                new ArrayWheelAdapter<>(getApplicationContext(), shutterSpeeds.toArray(new String[shutterSpeeds.size()]));
+        mShutterSpeedWheel.setViewAdapter(shutterSpeedsAdapter);
+        if (!mShutterSpeedWheel.isScrolling()) {
+            mShutterSpeedWheel.setCurrentItem(shutterSpeeds.indexOf(cameraStatus.getShutterSpeed()));
+        }
+    }
+
+    private void loadApertures(CameraStatus cameraStatus) {
+        List<String> apertures = cameraStatus.getApertures();
+        ArrayWheelAdapter<String> aperturesAdapter =
+                new ArrayWheelAdapter<>(getApplicationContext(), apertures.toArray(new String[apertures.size()]));
+        mApertureWheel.setViewAdapter(aperturesAdapter);
+        if (!mApertureWheel.isScrolling()) {
+            mApertureWheel.setCurrentItem(apertures.indexOf(cameraStatus.getAperture()));
+        }
+    }
+
+    private void loadExposureModes(CameraStatus cameraStatus) {
+        List<String> exposureModes = cameraStatus.getExposureModes();
+        ArrayWheelAdapter<String> exposureModesAdapter =
+                new ArrayWheelAdapter<>(getApplicationContext(), exposureModes.toArray(new String[exposureModes.size()]));
+        mExposureModeWheel.setViewAdapter(exposureModesAdapter);
+        if (!mExposureModeWheel.isScrolling()) {
+            mExposureModeWheel.setCurrentItem(exposureModes.indexOf(cameraStatus.getExposureMode()));
+        }
+    }
+
+    private void loadIsos(CameraStatus cameraStatus) {
+        List<String> isos = new ArrayList<>();
+        isos.add(ISO_AUTO);
+        isos.addAll(cameraStatus.getIsos());
+        ArrayWheelAdapter<String> isosAdapter =
+                new ArrayWheelAdapter<>(getApplicationContext(), isos.toArray(new String[isos.size()]));
+        if (!mIsoWheel.isScrolling()) {
+            mIsoWheel.setViewAdapter(isosAdapter);
+
+            if (cameraStatus.getIsoAuto() != null && cameraStatus.getIsoAuto()) {
+                mIsoWheel.setCurrentItem(0);
+            } else {
+                mIsoWheel.setCurrentItem(isos.indexOf(cameraStatus.getIso()));
+            }
+        }
+    }
+
+
+
+    public boolean isManualAperture() {
+        return EXPOSURE_MODE_M.equals(mExposureMode) || EXPOSURE_MODE_A.equals(mExposureMode);
+    }
+
+    public boolean isManualShutterSpeed() {
+        return EXPOSURE_MODE_M.equals(mExposureMode) || EXPOSURE_MODE_SHUTTER_SPEED.equals(mExposureMode);
+    }
+
+    public boolean isManualISO() {
+        return !ISO_AUTO.equals(mIso);
+    }
+
+
+
 }
